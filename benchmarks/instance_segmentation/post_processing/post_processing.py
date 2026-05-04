@@ -72,20 +72,23 @@ def main() -> None:
     mask_h, mask_w = 160, 160
     masks = torch.rand(num_instances, mask_h, mask_w, dtype=torch.float32)
 
-    pairs = list(
-        align_instance_segmentation_results_to_rle_masks(
-            image_bboxes=image_bboxes,
-            masks=masks,
-            padding=padding,
-            scale_width=scale_width,
-            scale_height=scale_height,
-            original_size=original_size,
-            size_after_pre_processing=size_after_pre_processing,
-            inference_size=inference_size,
-            static_crop_offset=static_crop_offset,
-            binarization_threshold=0.5,
-        )
-    )
+    bboxes = []
+    rle_masks = []
+    
+    for bbox, mask in align_instance_segmentation_results_to_rle_masks(
+        image_bboxes=image_bboxes,
+        masks=masks,
+        padding=padding,
+        scale_width=scale_width,
+        scale_height=scale_height,
+        original_size=original_size,
+        size_after_pre_processing=size_after_pre_processing,
+        inference_size=inference_size,
+        static_crop_offset=static_crop_offset,
+        binarization_threshold=0.5,
+    ):
+        bboxes.append(bbox)
+        rle_masks.append(mask)
 
     print(
         f"letterbox: original={original_size.width}x{original_size.height} "
@@ -94,7 +97,7 @@ def main() -> None:
         f"(top/bottom bars = {pad_top}px each)"
     )
 
-    for i, (bbox, rle) in enumerate(pairs):
+    for i, (bbox, rle) in enumerate(zip(bboxes, rle_masks)):
         counts = rle["counts"]
         n_counts = len(counts) if hasattr(counts, "__len__") else "n/a"
         print(
