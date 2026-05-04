@@ -38,7 +38,7 @@ def _restrict_inference_models_to_backend(backend: str) -> None:
 @click.option(
     "--model-id",
     type=click.Choice(ALLOWED_MODEL_IDS, case_sensitive=True),
-    default="yolov8n-seg-640",
+    default="rfdetr-seg-nano",
     show_default=True,
     help="Roboflow model id (instance segmentation) (see inference.core.models.inference_models_adapters ALLOWED_MODEL_IDS).",
 )
@@ -53,7 +53,8 @@ def _restrict_inference_models_to_backend(backend: str) -> None:
     "--image",
     "image_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
+    default=Path(__file__).resolve().parents[4] / "data" / "dummy" / "szorki.jpg",
+    show_default=True,
     help="Input image.",
 )
 def main(
