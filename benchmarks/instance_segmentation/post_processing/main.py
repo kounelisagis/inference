@@ -30,7 +30,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _restrict_inference_models_to_backend(backend: str) -> None:
-    os.environ["DISABLED_INFERENCE_MODELS_BACKENDS"] = ALLOWED_BACKENDS - set(backend)
+    disabled = ALLOWED_BACKENDS - {backend}
+    os.environ["DISABLED_INFERENCE_MODELS_BACKENDS"] = ",".join(sorted(disabled))
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -45,14 +46,14 @@ def _restrict_inference_models_to_backend(backend: str) -> None:
     type=click.Choice(ALLOWED_BACKENDS, case_sensitive=True),
     default="onnx",
     show_default=True,
-    help="Execution backend (only ONNX is supported by this script).",
+    help="Inference-models backend (see inference.core.env VALID_INFERENCE_MODELS_BACKENDS).",
 )
 @click.option(
     "--image",
     "image_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
-    help=f"Input image",
+    help="Input image.",
 )
 def main(
     model_id: str,
@@ -69,10 +70,9 @@ def main(
             "root or current working directory, or export it in the environment."
         )
 
-    if backend == "onnx":
-        _restrict_inference_models_to_backend(backend)
+    _restrict_inference_models_to_backend(backend)
 
-    # Import after optional backend env override (inference.core.env reads it at import time).
+    # Import after backend env override (inference.core.env reads DISABLED_* at import time).
     from inference.core.models.inference_models_adapters import (
         InferenceModelsInstanceSegmentationAdapter,
     )
