@@ -38,8 +38,9 @@ def _restrict_inference_models_to_backend(backend: str) -> None:
 @click.option(
     "--model-id",
     type=click.Choice(ALLOWED_MODEL_IDS, case_sensitive=True),
-    required=True,
-    help="Roboflow model id (instance segmentation).",
+    default="yolov8n-seg-640",
+    show_default=True,
+    help="Roboflow model id (instance segmentation) (see inference.core.models.inference_models_adapters ALLOWED_MODEL_IDS).",
 )
 @click.option(
     "--backend",
