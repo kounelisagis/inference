@@ -190,21 +190,20 @@ def main(
     print(f"BBox control sum: {bboxes_template.sum()=}")
 
     def run_once(image_bboxes: torch.Tensor, masks: torch.Tensor) -> None:
-        with nvtx.range("post-processing"):
-            for _, _ in candidate_fn(
-                image_bboxes=image_bboxes,
-                masks=masks,
-                padding=padding,
-                scale_width=scale_width,
-                scale_height=scale_height,
-                original_size=original_size,
-                size_after_pre_processing=size_after_pre_processing,
-                inference_size=inference_size,
-                static_crop_offset=static_crop_offset,
-                binarization_threshold=0.5,
-                rle_build_fn=rle_build_fn,
-            ):
-                pass
+        for _, _ in candidate_fn(
+            image_bboxes=image_bboxes,
+            masks=masks,
+            padding=padding,
+            scale_width=scale_width,
+            scale_height=scale_height,
+            original_size=original_size,
+            size_after_pre_processing=size_after_pre_processing,
+            inference_size=inference_size,
+            static_crop_offset=static_crop_offset,
+            binarization_threshold=0.5,
+            rle_build_fn=rle_build_fn,
+        ):
+            pass
 
     print(f"Warming up {warmup} iterations...")
     for _ in range(warmup):
@@ -222,7 +221,8 @@ def main(
         _sync_if_cuda(torch_device)
         t0 = time.perf_counter()
 
-        run_once(image_bboxes=image_bboxes, masks=masks)
+        with nvtx.range("post-processing"):
+            run_once(image_bboxes=image_bboxes, masks=masks)
 
         _sync_if_cuda(torch_device)
         t1 = time.perf_counter()
