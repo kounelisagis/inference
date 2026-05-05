@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 import time
-from typing import List, Tuple
+from typing import Callable, FrozenSet, Generator, List, Tuple
 
 import click
 import numpy as np
@@ -12,71 +12,35 @@ import torch
 
 from inference_models.entities import ImageDimensions
 from inference_models.models.common.roboflow.model_packages import StaticCropOffset
-from inference_models.models.common.roboflow.post_processing import (
+from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.candidates import (
     align_instance_segmentation_results_to_rle_masks,
+    align_instance_segmentation_results_to_rle_masks_cropped,
+)
+from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.data import (
+    build_image_bboxes,
+    letterbox_params,
 )
 
+CandidateFnType = Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        Tuple[int, int, int, int],
+        float,
+        float,
+        ImageDimensions,
+        ImageDimensions,
+        ImageDimensions,
+        StaticCropOffset,
+        float,
+    ],
+    Generator[Tuple[torch.Tensor, dict], None, None],
+]
 
-def letterbox_params(
-    original_size: ImageDimensions, inference_size: ImageDimensions
-) -> Tuple[Tuple[int, int, int, int], float, int, int]:
-    """Same as Roboflow letterbox; returns padding, scale, and embedded content size (new_w, new_h)."""
-    orig_h, orig_w = original_size.height, original_size.width
-    tgt_h, tgt_w = inference_size.height, inference_size.width
-    scale_w = tgt_w / orig_w
-    scale_h = tgt_h / orig_h
-    scale = min(scale_w, scale_h)
-    new_w = int(orig_w * scale)
-    new_h = int(orig_h * scale)
-    pad_top = int((tgt_h - new_h) / 2)
-    pad_left = int((tgt_w - new_w) / 2)
-    pad_right = tgt_w - pad_left - new_w
-    pad_bottom = tgt_h - pad_top - new_h
-    padding = (pad_left, pad_top, pad_right, pad_bottom)
-    return padding, scale, new_w, new_h
-
-
-def build_image_bboxes(
-    n: int,
-    pad_left: int,
-    pad_top: int,
-    new_w: int,
-    new_h: int,
-    *,
-    device: torch.device,
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """
-    Build `n` rows of [x1, y1, x2, y2, conf, class] in letterboxed input space, inside the
-    scaled content (excluding border padding). Each instance shifts the top-left by 1px in
-    a serpentine pattern so boxes stay in-bounds for large `n`.
-    """
-    if n < 0:
-        raise ValueError("n must be non-negative")
-
-    box_w, box_h = 24, 24
-    margin = 2
-    min_x1 = pad_left + margin
-    min_y1 = pad_top + margin
-    max_x1 = pad_left + new_w - box_w - margin
-    max_y1 = pad_top + new_h - box_h - margin
-    if max_x1 < min_x1 or max_y1 < min_y1:
-        raise ValueError("Letterbox content too small for the fixed box size; adjust sizes.")
-
-    span_x = max_x1 - min_x1 + 1
-    span_y = max_y1 - min_y1 + 1
-    rows: List[List[float]] = []
-    for i in range(n):
-        step = i
-        x_off = step % span_x
-        y_off = (step // span_x) % span_y
-        x1 = float(min_x1 + x_off)
-        y1 = float(min_y1 + y_off)
-        x2 = x1 + box_w
-        y2 = y1 + box_h
-        rows.append([x1, y1, x2, y2, 0.9, float(i % 80)])
-
-    return torch.tensor(rows, dtype=dtype, device=device)
+CANDIDATE_FNS: FrozenSet[CandidateFnType] = frozenset({
+    align_instance_segmentation_results_to_rle_masks,
+    align_instance_segmentation_results_to_rle_masks_cropped,
+})
 
 
 def _sync_if_cuda(device: torch.device) -> None:
@@ -95,7 +59,17 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
     )
 
 
-@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.command(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    epilog="Candidate functions: " + ", ".join(map(str, CANDIDATE_FNS)),
+)
+@click.option(
+    "--candidate-fn",
+    type=click.Choice(list(CANDIDATE_FNS), case_sensitive=True),
+    default=list(CANDIDATE_FNS)[0],
+    show_default=True,
+    help="Candidate function to benchmark.",
+)
 @click.option(
     "--instances",
     "-n",
@@ -144,6 +118,7 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
     show_default=True,
 )
 def main(
+    candidate_fn: CandidateFnType,
     instances: int,
     warmup: int,
     iterations: int,
@@ -191,7 +166,7 @@ def main(
     )
 
     def run_once(image_bboxes: torch.Tensor, masks: torch.Tensor) -> None:
-        for _, _ in align_instance_segmentation_results_to_rle_masks(
+        for _, _ in candidate_fn(
             image_bboxes=image_bboxes,
             masks=masks,
             padding=padding,
