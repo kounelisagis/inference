@@ -9,6 +9,7 @@ from typing import Callable, Dict, Generator, List, Tuple
 import click
 import numpy as np
 import torch
+import torch.cuda.nvtx as nvtx
 
 from inference_models.entities import ImageDimensions
 from inference_models.models.common.roboflow.model_packages import StaticCropOffset
@@ -189,6 +190,7 @@ def main(
     print(f"BBox control sum: {bboxes_template.sum()=}")
 
     def run_once(image_bboxes: torch.Tensor, masks: torch.Tensor) -> None:
+        nvtx.range_push("start")
         for _, _ in candidate_fn(
             image_bboxes=image_bboxes,
             masks=masks,
@@ -203,6 +205,7 @@ def main(
             rle_build_fn=rle_build_fn,
         ):
             pass
+        nvtx.range_pop()
 
     print(f"Warming up {warmup} iterations...")
     for _ in range(warmup):
