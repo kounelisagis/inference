@@ -2,6 +2,7 @@ from typing import Callable, Generator, Tuple
 
 import numpy as np
 import torch
+import torch.cuda.nvtx as nvtx
 from pycocotools import mask as mask_utils
 from torchvision.transforms import functional
 
@@ -41,71 +42,78 @@ def align_instance_segmentation_results_to_rle_masks(
     if image_bboxes.shape[0] == 0:
         return None
 
-    pad_left, pad_top, pad_right, pad_bottom = padding
-    offsets = torch.tensor(
-        [pad_left, pad_top, pad_left, pad_top],
-        device=image_bboxes.device,
-    )
-    image_bboxes[:, :4].sub_(offsets)
-    scale = torch.as_tensor(
-        [scale_width, scale_height, scale_width, scale_height],
-        dtype=image_bboxes.dtype,
-        device=image_bboxes.device,
-    )
-    image_bboxes[:, :4].div_(scale)
+    with nvtx.range("padding bboxes"):
+        pad_left, pad_top, pad_right, pad_bottom = padding
+        offsets = torch.tensor(
+            [pad_left, pad_top, pad_left, pad_top],
+            device=image_bboxes.device,
+        )
+        image_bboxes[:, :4].sub_(offsets)
 
-    needs_canvas = static_crop_offset.offset_x > 0 or static_crop_offset.offset_y > 0
-    if needs_canvas:
-        static_crop_offsets = torch.as_tensor(
-            [
-                static_crop_offset.offset_x,
-                static_crop_offset.offset_y,
-                static_crop_offset.offset_x,
-                static_crop_offset.offset_y,
-            ],
+    with nvtx.range("scaling bboxes"):
+        scale = torch.as_tensor(
+            [scale_width, scale_height, scale_width, scale_height],
             dtype=image_bboxes.dtype,
             device=image_bboxes.device,
         )
-        image_bboxes[:, :4].add_(static_crop_offsets)
-    n, mh, mw = masks.shape
-    mask_h_scale = mh / inference_size.height
-    mask_w_scale = mw / inference_size.width
-    mask_pad_top, mask_pad_bottom, mask_pad_left, mask_pad_right = (
-        round(mask_h_scale * pad_top),
-        round(mask_h_scale * pad_bottom),
-        round(mask_w_scale * pad_left),
-        round(mask_w_scale * pad_right),
-    )
-    if (
-        mask_pad_top < 0
-        or mask_pad_bottom < 0
-        or mask_pad_left < 0
-        or mask_pad_right < 0
-    ):
-        masks = torch.nn.functional.pad(
-            masks,
-            (
-                abs(min(mask_pad_left, 0)),
-                abs(min(mask_pad_right, 0)),
-                abs(min(mask_pad_top, 0)),
-                abs(min(mask_pad_bottom, 0)),
-            ),
-            "constant",
-            0,
+        image_bboxes[:, :4].div_(scale)
+
+    with nvtx.range("canvas bboxes"):
+        needs_canvas = static_crop_offset.offset_x > 0 or static_crop_offset.offset_y > 0
+        if needs_canvas:
+            static_crop_offsets = torch.as_tensor(
+                [
+                    static_crop_offset.offset_x,
+                    static_crop_offset.offset_y,
+                    static_crop_offset.offset_x,
+                    static_crop_offset.offset_y,
+                ],
+                dtype=image_bboxes.dtype,
+                device=image_bboxes.device,
+            )
+            image_bboxes[:, :4].add_(static_crop_offsets)
+
+    with nvtx.range("padding masks"):
+        n, mh, mw = masks.shape
+        mask_h_scale = mh / inference_size.height
+        mask_w_scale = mw / inference_size.width
+        mask_pad_top, mask_pad_bottom, mask_pad_left, mask_pad_right = (
+            round(mask_h_scale * pad_top),
+            round(mask_h_scale * pad_bottom),
+            round(mask_w_scale * pad_left),
+            round(mask_w_scale * pad_right),
         )
-        padded_mask_offset_top = max(mask_pad_top, 0)
-        padded_mask_offset_bottom = max(mask_pad_bottom, 0)
-        padded_mask_offset_left = max(mask_pad_left, 0)
-        padded_mask_offset_right = max(mask_pad_right, 0)
-        masks = masks[
-            :,
-            padded_mask_offset_top : masks.shape[1] - padded_mask_offset_bottom,
-            padded_mask_offset_left : masks.shape[2] - padded_mask_offset_right,
-        ]
-    else:
-        masks = masks[
-            :, mask_pad_top : mh - mask_pad_bottom, mask_pad_left : mw - mask_pad_right
-        ]
+        if (
+            mask_pad_top < 0
+            or mask_pad_bottom < 0
+            or mask_pad_left < 0
+            or mask_pad_right < 0
+        ):
+            masks = torch.nn.functional.pad(
+                masks,
+                (
+                    abs(min(mask_pad_left, 0)),
+                    abs(min(mask_pad_right, 0)),
+                    abs(min(mask_pad_top, 0)),
+                    abs(min(mask_pad_bottom, 0)),
+                ),
+                "constant",
+                0,
+            )
+            padded_mask_offset_top = max(mask_pad_top, 0)
+            padded_mask_offset_bottom = max(mask_pad_bottom, 0)
+            padded_mask_offset_left = max(mask_pad_left, 0)
+            padded_mask_offset_right = max(mask_pad_right, 0)
+            masks = masks[
+                :,
+                padded_mask_offset_top : masks.shape[1] - padded_mask_offset_bottom,
+                padded_mask_offset_left : masks.shape[2] - padded_mask_offset_right,
+            ]
+        else:
+            masks = masks[
+                :, mask_pad_top : mh - mask_pad_bottom, mask_pad_left : mw - mask_pad_right
+            ]
+
 
     target_h = size_after_pre_processing.height
     target_w = size_after_pre_processing.width
@@ -113,33 +121,39 @@ def align_instance_segmentation_results_to_rle_masks(
     offset_x = static_crop_offset.offset_x
     num_instances = image_bboxes.shape[0]
     for i in range(num_instances):
-        # keep a batch dim so functional.resize is unambiguous
-        single = masks[i : i + 1]
-        resized = (
-            functional.resize(
-                single,
-                [target_h, target_w],
-                interpolation=functional.InterpolationMode.BILINEAR,
+        with nvtx.range("resizing mask"):
+            # keep a batch dim so functional.resize is unambiguous
+            single = masks[i : i + 1]
+            resized = (
+                functional.resize(
+                    single,
+                    [target_h, target_w],
+                    interpolation=functional.InterpolationMode.BILINEAR,
+                )
+                .gt_(binarization_threshold)
+                .to(dtype=torch.bool)
             )
-            .gt_(binarization_threshold)
-            .to(dtype=torch.bool)
-        )
-        if needs_canvas:
-            mask_canvas = torch.zeros(
-                (original_size.height, original_size.width),
-                dtype=torch.bool,
-                device=resized.device,
-            )
-            mask_canvas[
-                offset_y : offset_y + resized.shape[1],
-                offset_x : offset_x + resized.shape[2],
-            ] = resized[0]
-            converted = rle_build_fn(mask_canvas)
-            del mask_canvas
-        else:
-            converted = rle_build_fn(resized[0])
-        del resized
-        yield image_bboxes[i], converted
+
+        with nvtx.range("building rle"):
+            if needs_canvas:
+                mask_canvas = torch.zeros(
+                    (original_size.height, original_size.width),
+                    dtype=torch.bool,
+                    device=resized.device,
+                )
+                mask_canvas[
+                    offset_y : offset_y + resized.shape[1],
+                    offset_x : offset_x + resized.shape[2],
+                ] = resized[0]
+                converted = rle_build_fn(mask_canvas)
+                del mask_canvas
+            else:
+                converted = rle_build_fn(resized[0])
+
+        with nvtx.range("yielding result"):
+            del resized
+            yield image_bboxes[i], converted
+
     return None
 
 
