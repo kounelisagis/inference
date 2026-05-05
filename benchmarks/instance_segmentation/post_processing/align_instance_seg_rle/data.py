@@ -1,6 +1,7 @@
 from typing import List, Tuple
 
 import torch
+from tqdm import tqdm
 
 from inference_models.entities import ImageDimensions
 
@@ -53,7 +54,7 @@ def build_image_bboxes(
     span_x = max_x1 - min_x1 + 1
     span_y = max_y1 - min_y1 + 1
     rows: List[List[float]] = []
-    for i in range(n):
+    for i in tqdm(range(n), desc="Building image bboxes"):
         step = i
         x_off = step % span_x
         y_off = (step // span_x) % span_y

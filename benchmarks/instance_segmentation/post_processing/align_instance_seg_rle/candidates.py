@@ -1,9 +1,10 @@
 from typing import Generator, Tuple
 
 import torch
-import torch.nn.functional as functional
+from torchvision.transforms import functional
 
-from inference_models.models.base.types import ImageDimensions, StaticCropOffset
+from inference_models.entities import ImageDimensions
+from inference_models.models.common.roboflow.model_packages import StaticCropOffset
 from inference_models.models.common.rle_utils import torch_mask_to_coco_rle
 
 

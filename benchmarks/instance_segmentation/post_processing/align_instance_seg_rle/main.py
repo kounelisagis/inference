@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Callable, FrozenSet, Generator, List, Tuple
+from typing import Callable, Dict, Generator, List, Tuple
 
 import click
 import numpy as np
@@ -37,10 +37,10 @@ CandidateFnType = Callable[
     Generator[Tuple[torch.Tensor, dict], None, None],
 ]
 
-CANDIDATE_FNS: FrozenSet[CandidateFnType] = frozenset({
-    align_instance_segmentation_results_to_rle_masks,
-    align_instance_segmentation_results_to_rle_masks_cropped,
-})
+CANDIDATE_FNS: Dict[str, CandidateFnType] = {
+    "default": align_instance_segmentation_results_to_rle_masks,
+    "cropped": align_instance_segmentation_results_to_rle_masks_cropped,
+}
 
 
 def _sync_if_cuda(device: torch.device) -> None:
@@ -61,12 +61,11 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
 
 @click.command(
     context_settings={"help_option_names": ["-h", "--help"]},
-    epilog="Candidate functions: " + ", ".join(map(str, CANDIDATE_FNS)),
 )
 @click.option(
     "--candidate-fn",
-    type=click.Choice(list(CANDIDATE_FNS), case_sensitive=True),
-    default=list(CANDIDATE_FNS)[0],
+    type=click.Choice(list(CANDIDATE_FNS.keys()), case_sensitive=True),
+    default="default",
     show_default=True,
     help="Candidate function to benchmark.",
 )
@@ -74,7 +73,8 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
     "--instances",
     "-n",
     type=int,
-    required=True,
+    default=100,
+    show_default=True,
     help="Number of instance rows (boxes / masks).",
 )
 @click.option(
@@ -133,6 +133,8 @@ def main(
     if warmup < 0 or iterations < 1:
         raise click.BadParameter("warmup must be >= 0 and iterations >= 1")
 
+    candidate_fn = CANDIDATE_FNS[candidate_fn]
+
     torch_device = torch.device(device)
     if seed is not None:
         random.seed(seed)
@@ -180,12 +182,14 @@ def main(
         ):
             pass
 
+    print(f"Warming up {warmup} iterations...")
     for _ in range(warmup):
         image_bboxes = bboxes_template.clone()
         masks = masks_template.clone()
         run_once(image_bboxes=image_bboxes, masks=masks)
     _sync_if_cuda(torch_device)
 
+    print(f"Timing {iterations} iterations...")
     times_ms: List[float] = []
     for _ in range(iterations):
         image_bboxes = bboxes_template.clone()
