@@ -20,6 +20,10 @@ from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.dat
     build_image_bboxes,
     letterbox_params,
 )
+from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.candidates import (
+    torch_mask_to_coco_rle,
+    torch_mask_to_coco_rle_old,
+)
 
 CandidateFnType = Callable[
     [
@@ -40,6 +44,11 @@ CandidateFnType = Callable[
 CANDIDATE_FNS: Dict[str, CandidateFnType] = {
     "default": align_instance_segmentation_results_to_rle_masks,
     "cropped": align_instance_segmentation_results_to_rle_masks_cropped,
+}
+
+RLE_BUILD_FNS: Dict[str, Callable[[torch.Tensor], dict]] = {
+    "new": torch_mask_to_coco_rle,
+    "old": torch_mask_to_coco_rle_old,
 }
 
 
@@ -68,6 +77,13 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
     default="default",
     show_default=True,
     help="Candidate function to benchmark.",
+)
+@click.option(
+    "--rle-build-fn",
+    type=click.Choice(list(RLE_BUILD_FNS.keys()), case_sensitive=True),
+    default="new",
+    show_default=True,
+    help="RLE build function to use.",
 )
 @click.option(
     "--instances",
@@ -119,6 +135,7 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
 )
 def main(
     candidate_fn: CandidateFnType,
+    rle_build_fn: Callable[[torch.Tensor], dict],
     instances: int,
     warmup: int,
     iterations: int,
@@ -134,6 +151,7 @@ def main(
         raise click.BadParameter("warmup must be >= 0 and iterations >= 1")
 
     candidate_fn = CANDIDATE_FNS[candidate_fn]
+    rle_build_fn = RLE_BUILD_FNS[rle_build_fn]
 
     torch_device = torch.device(device)
     if seed is not None:
@@ -182,6 +200,7 @@ def main(
             inference_size=inference_size,
             static_crop_offset=static_crop_offset,
             binarization_threshold=0.5,
+            rle_build_fn=rle_build_fn,
         ):
             pass
 

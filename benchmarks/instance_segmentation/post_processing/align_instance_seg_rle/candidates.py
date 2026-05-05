@@ -1,8 +1,8 @@
-from typing import Generator, Tuple
+from typing import Callable, Generator, Tuple
 
-# import numpy as np
+import numpy as np
 import torch
-# from pycocotools import mask as mask_utils
+from pycocotools import mask as mask_utils
 from torchvision.transforms import functional
 
 from inference_models.entities import ImageDimensions
@@ -10,9 +10,9 @@ from inference_models.models.common.roboflow.model_packages import StaticCropOff
 from inference_models.models.common.rle_utils import torch_mask_to_coco_rle
 
 
-# def torch_mask_to_coco_rle(mask: torch.Tensor) -> dict:
-#     np_mask = np.asfortranarray(mask.detach().cpu().numpy().astype(np.uint8))
-#     return mask_utils.encode(np_mask)
+def torch_mask_to_coco_rle_old(mask: torch.Tensor) -> dict:
+    np_mask = np.asfortranarray(mask.detach().cpu().numpy().astype(np.uint8))
+    return mask_utils.encode(np_mask)
 
 
 def align_instance_segmentation_results_to_rle_masks(
@@ -26,6 +26,7 @@ def align_instance_segmentation_results_to_rle_masks(
     inference_size: ImageDimensions,
     static_crop_offset: StaticCropOffset,
     binarization_threshold: float = 0.0,
+    rle_build_fn: Callable[[torch.Tensor], dict] = torch_mask_to_coco_rle,
 ) -> Generator[Tuple[torch.Tensor, dict], None, None]:
     """
     Generator variant of align_instance_segmentation_results.
@@ -133,10 +134,10 @@ def align_instance_segmentation_results_to_rle_masks(
                 offset_y : offset_y + resized.shape[1],
                 offset_x : offset_x + resized.shape[2],
             ] = resized[0]
-            converted = torch_mask_to_coco_rle(mask_canvas)
+            converted = rle_build_fn(mask_canvas)
             del mask_canvas
         else:
-            converted = torch_mask_to_coco_rle(resized[0])
+            converted = rle_build_fn(resized[0])
         del resized
         yield image_bboxes[i], converted
     return None
@@ -153,6 +154,7 @@ def align_instance_segmentation_results_to_rle_masks_cropped(
     inference_size: ImageDimensions,
     static_crop_offset: StaticCropOffset,
     binarization_threshold: float = 0.0,
+    rle_build_fn: Callable[[torch.Tensor], dict] = torch_mask_to_coco_rle,
 ) -> Generator[Tuple[torch.Tensor, dict], None, None]:
     """
     Same contract as ``align_instance_segmentation_results_to_rle_masks``, but
@@ -272,9 +274,9 @@ def align_instance_segmentation_results_to_rle_masks_cropped(
                     dtype=torch.bool,
                     device=masks.device,
                 )
-                converted = torch_mask_to_coco_rle(mask_canvas)
+                converted = rle_build_fn(mask_canvas)
             else:
-                converted = torch_mask_to_coco_rle(
+                converted = rle_build_fn(
                     torch.zeros(
                         (target_h, target_w),
                         dtype=torch.bool,
@@ -317,7 +319,7 @@ def align_instance_segmentation_results_to_rle_masks_cropped(
                 offset_y + py1_i : offset_y + py2_i,
                 offset_x + px1_i : offset_x + px2_i,
             ] = resized[0]
-            converted = torch_mask_to_coco_rle(mask_canvas)
+            converted = rle_build_fn(mask_canvas)
         else:
             full_mask = torch.zeros(
                 (target_h, target_w),
@@ -325,7 +327,7 @@ def align_instance_segmentation_results_to_rle_masks_cropped(
                 device=resized.device,
             )
             full_mask[py1_i:py2_i, px1_i:px2_i] = resized[0]
-            converted = torch_mask_to_coco_rle(full_mask)
+            converted = rle_build_fn(full_mask)
         del resized
         yield image_bboxes[i], converted
     return None
