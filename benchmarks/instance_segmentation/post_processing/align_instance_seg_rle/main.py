@@ -167,6 +167,9 @@ def main(
         instances, mask_h, mask_w, dtype=torch.float32, device=torch_device
     )
 
+    print(f"Mask control sum: {masks_template.sum()=}")
+    print(f"BBox control sum: {bboxes_template.sum()=}")
+
     def run_once(image_bboxes: torch.Tensor, masks: torch.Tensor) -> None:
         for _, _ in candidate_fn(
             image_bboxes=image_bboxes,

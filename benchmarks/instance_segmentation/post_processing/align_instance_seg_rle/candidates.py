@@ -1,12 +1,18 @@
 from typing import Generator, Tuple
 
+# import numpy as np
 import torch
+# from pycocotools import mask as mask_utils
 from torchvision.transforms import functional
 
 from inference_models.entities import ImageDimensions
 from inference_models.models.common.roboflow.model_packages import StaticCropOffset
 from inference_models.models.common.rle_utils import torch_mask_to_coco_rle
 
+
+# def torch_mask_to_coco_rle(mask: torch.Tensor) -> dict:
+#     np_mask = np.asfortranarray(mask.detach().cpu().numpy().astype(np.uint8))
+#     return mask_utils.encode(np_mask)
 
 
 def align_instance_segmentation_results_to_rle_masks(
