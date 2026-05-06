@@ -37,6 +37,54 @@ def torch_mask_to_coco_new(mask: torch.Tensor) -> dict:
     return rle
 
 
+def torch_mask_to_coco_optimized_v1(mask: torch.Tensor) -> dict:
+    # Convert to uncompressed run length encoding in GPU
+    # coco tools expect fortran order (column-wise)
+    with nvtx_range_if_cuda("permute_contiguous", mask.device):
+        mask_flat = mask.t().contiguous().view(-1)
+    with nvtx_range_if_cuda("unique consecutive", mask.device):
+        values, lengths = torch.unique_consecutive(mask_flat, return_counts=True)
+    with nvtx_range_if_cuda("counts", mask.device):
+        counts = lengths.cpu().tolist()
+    with nvtx_range_if_cuda("insert 0", mask.device):
+        if values[0] == 1:
+            counts.insert(0, 0)
+
+    h, w = mask.shape
+    with nvtx_range_if_cuda("compress", mask.device):
+        rle = mask_utils.frPyObjects({"counts": counts, "size": [h, w]}, h, w)
+    return rle
+
+
+def torch_mask_to_coco_optimized_v2(mask: torch.Tensor) -> dict:
+    h, w = mask.shape
+
+    with nvtx_range_if_cuda("transpose", mask.device):
+        x = mask.t().contiguous().view(-1)
+
+    with nvtx_range_if_cuda("diff", mask.device):
+        change = torch.ones_like(x, dtype=torch.bool)
+        change[1:] = x[1:] != x[:-1]
+
+        idx = torch.nonzero(change, as_tuple=False).flatten()
+
+        lengths = torch.empty_like(idx)
+        lengths[:-1] = idx[1:] - idx[:-1]
+        lengths[-1] = x.numel() - idx[-1]
+
+    with nvtx_range_if_cuda("d->h movement", mask.device):
+        counts = lengths.cpu().tolist()
+
+    with nvtx_range_if_cuda("insert 0", mask.device):
+        if x[0].item():
+            counts.insert(0, 0)
+
+    with nvtx_range_if_cuda("compress", mask.device):
+        rle = mask_utils.frPyObjects({"counts": counts, "size": [h, w]}, h, w)
+
+    return rle
+
+
 def align_instance_segmentation_results_to_rle_masks(
     image_bboxes: torch.Tensor,
     masks: torch.Tensor,
