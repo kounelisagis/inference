@@ -16,9 +16,9 @@ from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
-
-def rle_encode(mask_2d: npt.NDArray[Any]) -> npt.NDArray[np.int32]:
+def rle_encode(mask_2d: torch.Tensor) -> npt.NDArray[np.int32]:
     """Run-length encode a 2D boolean mask in column-major (Fortran) order.
 
     Pixels are scanned column-by-column (top-to-bottom within each column,
@@ -43,6 +43,7 @@ def rle_encode(mask_2d: npt.NDArray[Any]) -> npt.NDArray[np.int32]:
 
         ```
     """
+    mask_2d = mask_2d.detach().cpu().numpy()
     flat = mask_2d.ravel(order="F")  # F-order (column-major, COCO-compatible)
     if len(flat) == 0:
         return np.array([0], dtype=np.int32)
