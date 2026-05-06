@@ -18,6 +18,7 @@ from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.can
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.data import (
     build_image_bboxes,
+    build_synthetic_instance_masks,
     letterbox_params,
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.candidates import (
@@ -233,8 +234,11 @@ def main(
         box_h=box_h,
         device=torch_device,
     )
-    masks_template = torch.rand(
-        instances, mask_h, mask_w, dtype=torch.float32, device=torch_device
+    masks_template = build_synthetic_instance_masks(
+        bboxes=bboxes_template,
+        mask_h=mask_h,
+        mask_w=mask_w,
+        inference_size=inference_size,
     )
 
     print(f"Mask control sum: {masks_template.sum()=}")
