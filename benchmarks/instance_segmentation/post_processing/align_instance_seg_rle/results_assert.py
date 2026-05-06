@@ -20,6 +20,12 @@ from data import (
     build_image_bboxes,
     letterbox_params,
 )
+from candidates import torch_mask_to_coco_new, torch_mask_to_coco_rle_old
+
+RLE_BUILD_FNS = {
+    "new": torch_mask_to_coco_new,
+    "old": torch_mask_to_coco_rle_old,
+}
 
 
 def _rle_equal(left: dict, right: dict) -> bool:
@@ -77,10 +83,41 @@ def _rle_equal(left: dict, right: dict) -> bool:
     help="Synthetic bbox width in letterboxed input space.",
 )
 @click.option(
+    "--original-size-h",
+    type=int,
+    default=800,
+    show_default=True,
+)
+@click.option(
+    "--original-size-w",
+    type=int,
+    default=900,
+    show_default=True,
+)
+@click.option(
+    "--inference-size-h",
+    type=int,
+    default=640,
+    show_default=True,
+)
+@click.option(
+    "--inference-size-w",
+    type=int,
+    default=640,
+    show_default=True,
+)
+@click.option(
     "--strict/--no-strict",
     default=False,
     show_default=True,
     help="Raise AssertionError when any mismatch is found.",
+)
+@click.option(
+    "--rle-build-fn",
+    type=click.Choice(list(RLE_BUILD_FNS.keys()), case_sensitive=True),
+    default="new",
+    show_default=True,
+    help="RLE build function to use.",
 )
 def main(
     instances: int,
@@ -90,10 +127,17 @@ def main(
     mask_w: int,
     box_h: int,
     box_w: int,
+    original_size_h: int,
+    original_size_w: int,
+    inference_size_h: int,
+    inference_size_w: int,
+    rle_build_fn: str,
     strict: bool,
 ) -> None:
     if instances < 1:
         raise click.BadParameter("instances must be >= 1")
+
+    rle_build_fn = RLE_BUILD_FNS[rle_build_fn]
 
     torch_device = torch.device(device)
     if seed is not None:
@@ -103,8 +147,8 @@ def main(
         if torch_device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
 
-    original_size = ImageDimensions(height=800, width=900)
-    inference_size = ImageDimensions(height=640, width=640)
+    original_size = ImageDimensions(height=original_size_h, width=original_size_w)
+    inference_size = ImageDimensions(height=inference_size_h, width=inference_size_w)
     padding, scale, new_w, new_h = letterbox_params(original_size, inference_size)
     pad_left, pad_top, _, _ = padding
 
@@ -144,6 +188,7 @@ def main(
             inference_size=inference_size,
             static_crop_offset=static_crop_offset,
             binarization_threshold=0.5,
+            rle_build_fn=rle_build_fn,
         )
     )
     cropped_results = list(
@@ -158,6 +203,7 @@ def main(
             inference_size=inference_size,
             static_crop_offset=static_crop_offset,
             binarization_threshold=0.5,
+            rle_build_fn=rle_build_fn,
         )
     )
 
