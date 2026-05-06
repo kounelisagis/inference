@@ -22,8 +22,8 @@ from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.dat
     letterbox_params,
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.candidates import (
-    torch_mask_to_coco_rle,
     torch_mask_to_coco_rle_old,
+    torch_mask_to_coco_new,
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.profiling import nvtx_range_if_cuda
 
@@ -49,7 +49,7 @@ CANDIDATE_FNS: Dict[str, CandidateFnType] = {
 }
 
 RLE_BUILD_FNS: Dict[str, Callable[[torch.Tensor], dict]] = {
-    "new": torch_mask_to_coco_rle,
+    "new": torch_mask_to_coco_new,
     "old": torch_mask_to_coco_rle_old,
 }
 

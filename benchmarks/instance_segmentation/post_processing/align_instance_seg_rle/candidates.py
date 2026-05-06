@@ -7,13 +7,34 @@ from torchvision.transforms import functional
 
 from inference_models.entities import ImageDimensions
 from inference_models.models.common.roboflow.model_packages import StaticCropOffset
-from inference_models.models.common.rle_utils import torch_mask_to_coco_rle
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.profiling import nvtx_range_if_cuda
 
 
 def torch_mask_to_coco_rle_old(mask: torch.Tensor) -> dict:
-    np_mask = np.asfortranarray(mask.detach().cpu().numpy().astype(np.uint8))
-    return mask_utils.encode(np_mask)
+    with nvtx_range_if_cuda("d->h movement", mask.device):
+        np_mask = np.asfortranarray(mask.detach().cpu().numpy().astype(np.uint8))
+    with nvtx_range_if_cuda("encode", mask.device):
+        rle = mask_utils.encode(np_mask)
+    return rle
+
+
+def torch_mask_to_coco_new(mask: torch.Tensor) -> dict:
+    # Convert to uncompressed run length encoding in GPU
+    # coco tools expect fortran order (column-wise)
+    with nvtx_range_if_cuda("permute", mask.device):
+        mask_flat = mask.permute(1, 0).reshape(-1)
+    with nvtx_range_if_cuda("unique consecutive", mask.device):
+        values, lengths = torch.unique_consecutive(mask_flat, return_counts=True)
+    with nvtx_range_if_cuda("counts", mask.device):
+        counts = lengths.cpu().tolist()
+    with nvtx_range_if_cuda("insert 0", mask.device):
+        if values[0] == 1:
+            counts.insert(0, 0)
+
+    h, w = mask.shape
+    with nvtx_range_if_cuda("compress", mask.device):
+        rle = mask_utils.frPyObjects({"counts": counts, "size": [h, w]}, h, w)
+    return rle
 
 
 def align_instance_segmentation_results_to_rle_masks(
@@ -27,7 +48,7 @@ def align_instance_segmentation_results_to_rle_masks(
     inference_size: ImageDimensions,
     static_crop_offset: StaticCropOffset,
     binarization_threshold: float = 0.0,
-    rle_build_fn: Callable[[torch.Tensor], dict] = torch_mask_to_coco_rle,
+    rle_build_fn: Callable[[torch.Tensor], dict] = torch_mask_to_coco_new,
 ) -> Generator[Tuple[torch.Tensor, dict], None, None]:
     """
     Generator variant of align_instance_segmentation_results.
@@ -168,7 +189,7 @@ def align_instance_segmentation_results_to_rle_masks_cropped(
     inference_size: ImageDimensions,
     static_crop_offset: StaticCropOffset,
     binarization_threshold: float = 0.0,
-    rle_build_fn: Callable[[torch.Tensor], dict] = torch_mask_to_coco_rle,
+    rle_build_fn: Callable[[torch.Tensor], dict] = torch_mask_to_coco_new,
 ) -> Generator[Tuple[torch.Tensor, dict], None, None]:
     """
     Same contract as ``align_instance_segmentation_results_to_rle_masks``, but
