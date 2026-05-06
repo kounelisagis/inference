@@ -63,6 +63,20 @@ def _rle_equal(left: dict, right: dict) -> bool:
     show_default=True,
 )
 @click.option(
+    "--box-h",
+    type=int,
+    default=24,
+    show_default=True,
+    help="Synthetic bbox height in letterboxed input space.",
+)
+@click.option(
+    "--box-w",
+    type=int,
+    default=24,
+    show_default=True,
+    help="Synthetic bbox width in letterboxed input space.",
+)
+@click.option(
     "--strict/--no-strict",
     default=False,
     show_default=True,
@@ -74,6 +88,8 @@ def main(
     device: str,
     mask_h: int,
     mask_w: int,
+    box_h: int,
+    box_w: int,
     strict: bool,
 ) -> None:
     if instances < 1:
@@ -105,7 +121,14 @@ def main(
     scale_width = scale_height = scale
 
     image_bboxes = build_image_bboxes(
-        instances, pad_left, pad_top, new_w, new_h, device=torch_device
+        instances,
+        pad_left,
+        pad_top,
+        new_w,
+        new_h,
+        box_w=box_w,
+        box_h=box_h,
+        device=torch_device,
     )
     masks = torch.rand(instances, mask_h, mask_w, dtype=torch.float32, device=torch_device)
 
@@ -161,7 +184,7 @@ def main(
 
     same = mismatched_bbox == 0 and mismatched_rle == 0
     click.echo(
-        f"comparison for {instances} instances (device={device}, mask={mask_h}x{mask_w}, seed={seed})\n"
+        f"comparison for {instances} instances (device={device}, mask={mask_h}x{mask_w}, box={box_w}x{box_h}, seed={seed})\n"
         f"  bbox_equal={mismatched_bbox == 0} mismatched_bbox={mismatched_bbox}\n"
         f"  rle_equal={mismatched_rle == 0} mismatched_rle={mismatched_rle}"
     )

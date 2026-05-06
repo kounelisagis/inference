@@ -136,6 +136,20 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
     show_default=True,
 )
 @click.option(
+    "--box-h",
+    type=int,
+    default=24,
+    show_default=True,
+    help="Synthetic bbox height in letterboxed input space.",
+)
+@click.option(
+    "--box-w",
+    type=int,
+    default=24,
+    show_default=True,
+    help="Synthetic bbox width in letterboxed input space.",
+)
+@click.option(
     "--original-size-h",
     type=int,
     default=800,
@@ -169,6 +183,8 @@ def main(
     seed: int | None,
     mask_h: int,
     mask_w: int,
+    box_h: int,
+    box_w: int,
     original_size_h: int,
     original_size_w: int,
     inference_size_h: int,
@@ -209,7 +225,14 @@ def main(
     )
 
     bboxes_template = build_image_bboxes(
-        instances, pad_left, pad_top, new_w, new_h, device=torch_device
+        instances,
+        pad_left,
+        pad_top,
+        new_w,
+        new_h,
+        box_w=box_w,
+        box_h=box_h,
+        device=torch_device,
     )
     masks_template = torch.rand(
         instances, mask_h, mask_w, dtype=torch.float32, device=torch_device
@@ -262,7 +285,7 @@ def main(
 
     click.echo(
         f"align_instance_segmentation_results_to_rle_masks\n"
-        f"  device={device}  instances={instances}  mask={mask_h}x{mask_w}\n"
+        f"  device={device}  instances={instances}  mask={mask_h}x{mask_w}  box={box_w}x{box_h}\n"
         f"  letterbox: original={original_size.width}x{original_size.height} "
         f"→ {inference_size.width}x{inference_size.height}  scale={scale:.6f}\n"
         f"  padding LTRB={padding}  warmup={warmup}  iterations={iterations}\n"

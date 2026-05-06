@@ -31,6 +31,8 @@ def build_image_bboxes(
     new_w: int,
     new_h: int,
     *,
+    box_w: int = 24,
+    box_h: int = 24,
     device: torch.device,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
@@ -41,15 +43,18 @@ def build_image_bboxes(
     """
     if n < 0:
         raise ValueError("n must be non-negative")
+    if box_w <= 0 or box_h <= 0:
+        raise ValueError("box_w and box_h must be positive")
 
-    box_w, box_h = 24, 24
     margin = 2
     min_x1 = pad_left + margin
     min_y1 = pad_top + margin
     max_x1 = pad_left + new_w - box_w - margin
     max_y1 = pad_top + new_h - box_h - margin
     if max_x1 < min_x1 or max_y1 < min_y1:
-        raise ValueError("Letterbox content too small for the fixed box size; adjust sizes.")
+        raise ValueError(
+            f"Letterbox content too small for box size ({box_w}, {box_h}); adjust sizes."
+        )
 
     span_x = max_x1 - min_x1 + 1
     span_y = max_y1 - min_y1 + 1
