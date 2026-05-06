@@ -134,6 +134,30 @@ def _percentiles_ms(samples: List[float]) -> Tuple[float, float, float]:
     default=160,
     show_default=True,
 )
+@click.option(
+    "--original-size-h",
+    type=int,
+    default=800,
+    show_default=True,
+)
+@click.option(
+    "--original-size-w",
+    type=int,
+    default=900,
+    show_default=True,
+)
+@click.option(
+    "--inference-size-h",
+    type=int,
+    default=640,
+    show_default=True,
+)
+@click.option(
+    "--inference-size-w",
+    type=int,
+    default=640,
+    show_default=True,
+)
 def main(
     candidate_fn: CandidateFnType,
     rle_build_fn: Callable[[torch.Tensor], dict],
@@ -144,6 +168,10 @@ def main(
     seed: int | None,
     mask_h: int,
     mask_w: int,
+    original_size_h: int,
+    original_size_w: int,
+    inference_size_h: int,
+    inference_size_w: int,
 ) -> None:
     """Benchmark align_instance_segmentation_results_to_rle_masks (letterbox same as demo script)."""
     if instances < 1:
@@ -162,8 +190,8 @@ def main(
         if torch_device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
 
-    original_size = ImageDimensions(height=800, width=900)
-    inference_size = ImageDimensions(height=640, width=640)
+    original_size = ImageDimensions(height=original_size_h, width=original_size_w)
+    inference_size = ImageDimensions(height=inference_size_h, width=inference_size_w)
     padding, scale, new_w, new_h = letterbox_params(original_size, inference_size)
     pad_left, pad_top, _, _ = padding
 
