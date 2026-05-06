@@ -9,7 +9,6 @@ from typing import Callable, Dict, Generator, List, Tuple
 import click
 import numpy as np
 import torch
-import torch.cuda.nvtx as nvtx
 
 from inference_models.entities import ImageDimensions
 from inference_models.models.common.roboflow.model_packages import StaticCropOffset
