@@ -1,5 +1,6 @@
 from typing import List, Tuple
 
+import click
 import torch
 from tqdm import tqdm
 
@@ -121,3 +122,157 @@ def build_synthetic_instance_masks(
     background_noise = torch.rand_like(objectness) * 0.08
     masks = (objectness + edge_noise + background_noise).clamp_(0.0, 1.0)
     return masks
+
+
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--instances", type=int, default=16, show_default=True)
+@click.option(
+    "--sample-count",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Number of first samples to visualize.",
+)
+@click.option("--mask-h", type=int, default=160, show_default=True)
+@click.option("--mask-w", type=int, default=160, show_default=True)
+@click.option("--box-h", type=int, default=24, show_default=True)
+@click.option("--box-w", type=int, default=24, show_default=True)
+@click.option("--original-size-h", type=int, default=800, show_default=True)
+@click.option("--original-size-w", type=int, default=900, show_default=True)
+@click.option("--inference-size-h", type=int, default=640, show_default=True)
+@click.option("--inference-size-w", type=int, default=640, show_default=True)
+@click.option("--seed", type=int, default=42, show_default=True)
+@click.option(
+    "--threshold",
+    type=float,
+    default=None,
+    help="Optional mask threshold in [0, 1]. If provided, visualize binarized masks.",
+)
+@click.option(
+    "--output-html",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Optional output path for writing the Plotly figure as HTML.",
+)
+def main(
+    instances: int,
+    sample_count: int,
+    mask_h: int,
+    mask_w: int,
+    box_h: int,
+    box_w: int,
+    original_size_h: int,
+    original_size_w: int,
+    inference_size_h: int,
+    inference_size_w: int,
+    seed: int,
+    threshold: float | None,
+    output_html: str | None,
+) -> None:
+    try:
+        import plotly.graph_objects as go  # type: ignore[import-not-found]
+        from plotly.subplots import make_subplots  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise click.ClickException(
+            "Plotly is required for visualization. Install it with `uv add plotly`."
+        ) from error
+
+    if instances < 1:
+        raise click.BadParameter("instances must be >= 1")
+    if sample_count < 1:
+        raise click.BadParameter("sample-count must be >= 1")
+    if threshold is not None and (threshold < 0.0 or threshold > 1.0):
+        raise click.BadParameter("threshold must be in [0, 1]")
+
+    torch.manual_seed(seed)
+    device = torch.device("cpu")
+
+    original_size = ImageDimensions(height=original_size_h, width=original_size_w)
+    inference_size = ImageDimensions(height=inference_size_h, width=inference_size_w)
+    padding, _, new_w, new_h = letterbox_params(original_size, inference_size)
+    pad_left, pad_top, _, _ = padding
+
+    bboxes = build_image_bboxes(
+        instances,
+        pad_left,
+        pad_top,
+        new_w,
+        new_h,
+        box_w=box_w,
+        box_h=box_h,
+        device=device,
+    )
+    masks = build_synthetic_instance_masks(
+        bboxes=bboxes,
+        mask_h=mask_h,
+        mask_w=mask_w,
+        inference_size=inference_size,
+    )
+    sample_count = min(sample_count, instances)
+    scale_x = mask_w / inference_size.width
+    scale_y = mask_h / inference_size.height
+    columns = min(4, sample_count)
+    rows = (sample_count + columns - 1) // columns
+
+    fig = make_subplots(
+        rows=rows,
+        cols=columns,
+        subplot_titles=[f"sample {i}" for i in range(sample_count)],
+        horizontal_spacing=0.04,
+        vertical_spacing=0.08,
+    )
+
+    for sample_index in range(sample_count):
+        row = sample_index // columns + 1
+        col = sample_index % columns + 1
+        bbox = bboxes[sample_index]
+        mask = masks[sample_index]
+        display_mask = mask
+        if threshold is not None:
+            display_mask = mask.ge(threshold).to(dtype=torch.float32)
+
+        x1 = float(bbox[0].item() * scale_x)
+        y1 = float(bbox[1].item() * scale_y)
+        x2 = float(bbox[2].item() * scale_x)
+        y2 = float(bbox[3].item() * scale_y)
+
+        fig.add_trace(
+            go.Heatmap(
+                z=display_mask.cpu().numpy(),
+                colorscale="Viridis",
+                zmin=0.0,
+                zmax=1.0,
+                showscale=sample_index == 0,
+                colorbar={"title": "mask score"},
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_shape(
+            type="rect",
+            x0=x1,
+            y0=y1,
+            x1=x2,
+            y1=y2,
+            line={"color": "red", "width": 2},
+            fillcolor="rgba(0,0,0,0)",
+            row=row,
+            col=col,
+        )
+        fig.update_xaxes(title_text="mask x", row=row, col=col)
+        fig.update_yaxes(title_text="mask y", autorange="reversed", row=row, col=col)
+
+    title = f"First {sample_count} synthetic masks"
+    if threshold is not None:
+        title = f"{title} (thresholded at {threshold:.3f})"
+    fig.update_layout(title=title, height=max(420, 320 * rows))
+
+    if output_html is not None:
+        fig.write_html(output_html)
+        click.echo(f"Wrote figure to {output_html}")
+    else:
+        fig.show()
+
+
+if __name__ == "__main__":
+    main()
