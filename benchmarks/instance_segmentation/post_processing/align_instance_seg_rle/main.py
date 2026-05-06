@@ -25,6 +25,7 @@ from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.can
     torch_mask_to_coco_rle,
     torch_mask_to_coco_rle_old,
 )
+from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.profiling import nvtx_range_if_cuda
 
 CandidateFnType = Callable[
     [
@@ -249,7 +250,7 @@ def main(
         _sync_if_cuda(torch_device)
         t0 = time.perf_counter()
 
-        with nvtx.range("post-processing"):
+        with nvtx_range_if_cuda("post-processing", device=torch_device):
             run_once(image_bboxes=image_bboxes, masks=masks)
 
         _sync_if_cuda(torch_device)
