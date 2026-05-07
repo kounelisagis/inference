@@ -281,20 +281,25 @@ def align_instance_segmentation_results_to_rle_masks_via_compact_resize(
     num_instances = image_bboxes.shape[0]
 
     for i in range(num_instances):
-        with nvtx_range_if_cuda("compact encode + resize", image_bboxes.device):
+        with nvtx_range_if_cuda("bbox d -> h", image_bboxes.device):
             xyxy_row = bboxes_mask_xyxy[i : i + 1].detach().cpu().numpy()
+        with nvtx_range_if_cuda("mask d -> h", image_bboxes.device):
             mask_np = (masks[i] > binarization_threshold).detach().cpu().numpy()
+        with nvtx_range_if_cuda("compact mask from dense", image_bboxes.device):
             compact = CompactMask.from_dense(
                 mask_np[np.newaxis, ...],
                 xyxy_row,
                 (hm, wm),
             )
+        with nvtx_range_if_cuda("compact mask resize", image_bboxes.device):
             compact_resized = compact.resize((target_h, target_w))
             dense_hw = compact_resized[0]
 
-        full_tensor = torch.as_tensor(
-            dense_hw, device=image_bboxes.device, dtype=torch.bool
-        )
+        with nvtx_range_if_cuda("dense_mask to gpu tensor", image_bboxes.device):
+            full_tensor = torch.as_tensor(
+                dense_hw, device=image_bboxes.device, dtype=torch.bool
+            )
+
         with nvtx_range_if_cuda("building rle", image_bboxes.device):
             if needs_canvas:
                 mask_canvas = torch.zeros(
