@@ -173,7 +173,6 @@ def align_instance_segmentation_results_to_rle_masks(
                 converted = rle_build_fn(mask_canvas)
                 del mask_canvas
             else:
-                torch.cuda.synchronize()
                 converted = rle_build_fn(resized[0], image_bboxes[i])
 
         with nvtx_range_if_cuda("yielding result", image_bboxes.device):
