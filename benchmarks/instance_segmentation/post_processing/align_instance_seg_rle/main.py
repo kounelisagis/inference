@@ -14,6 +14,7 @@ from inference_models.entities import ImageDimensions
 from inference_models.models.common.roboflow.model_packages import StaticCropOffset
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.candidates import (
     align_instance_segmentation_results_to_rle_masks,
+    align_instance_segmentation_results_to_rle_masks_via_compact_resize,
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.data import (
     build_image_bboxes,
@@ -44,6 +45,7 @@ CandidateFnType = Callable[
 
 CANDIDATE_FNS: Dict[str, CandidateFnType] = {
     "default": align_instance_segmentation_results_to_rle_masks,
+    "compact_resize": align_instance_segmentation_results_to_rle_masks_via_compact_resize,
 }
 
 RLE_BUILD_FNS: Dict[str, Callable[[torch.Tensor], dict]] = {
@@ -194,7 +196,8 @@ def main(
     if warmup < 0 or iterations < 1:
         raise click.BadParameter("warmup must be >= 0 and iterations >= 1")
 
-    candidate_fn = CANDIDATE_FNS[candidate_fn]
+    candidate_label = candidate_fn
+    candidate_impl = CANDIDATE_FNS[candidate_fn]
     rle_build_fn = RLE_BUILD_FNS[rle_build_fn]
 
     torch_device = torch.device(device)
@@ -243,7 +246,7 @@ def main(
     print(f"BBox control sum: {bboxes_template.sum()=}")
 
     def run_once(image_bboxes: torch.Tensor, masks: torch.Tensor) -> None:
-        for _, _ in candidate_fn(
+        for _, _ in candidate_impl(
             image_bboxes=image_bboxes,
             masks=masks,
             padding=padding,
@@ -285,7 +288,7 @@ def main(
     p50, p95, p99 = _percentiles_ms(times_ms)
 
     click.echo(
-        f"align_instance_segmentation_results_to_rle_masks\n"
+        f"align_instance_seg_rle (candidate={candidate_label})\n"
         f"  device={device}  instances={instances}  mask={mask_h}x{mask_w}  box={box_w}x{box_h}\n"
         f"  letterbox: original={original_size.width}x{original_size.height} "
         f"→ {inference_size.width}x{inference_size.height}  scale={scale:.6f}\n"
