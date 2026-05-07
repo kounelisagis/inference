@@ -14,7 +14,6 @@ from inference_models.entities import ImageDimensions
 from inference_models.models.common.roboflow.model_packages import StaticCropOffset
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.candidates import (
     align_instance_segmentation_results_to_rle_masks,
-    align_instance_segmentation_results_to_rle_masks_cropped,
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.data import (
     build_image_bboxes,
@@ -26,6 +25,7 @@ from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.can
     torch_mask_to_coco_new,
     torch_mask_to_coco_optimized_v1,
     torch_mask_to_coco_optimized_v2,
+    torch_mask_to_coco_optimized_v3,
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.profiling import nvtx_range_if_cuda
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.compact_mask import rle_encode
@@ -48,7 +48,6 @@ CandidateFnType = Callable[
 
 CANDIDATE_FNS: Dict[str, CandidateFnType] = {
     "default": align_instance_segmentation_results_to_rle_masks,
-    "cropped": align_instance_segmentation_results_to_rle_masks_cropped,
 }
 
 RLE_BUILD_FNS: Dict[str, Callable[[torch.Tensor], dict]] = {
@@ -57,6 +56,7 @@ RLE_BUILD_FNS: Dict[str, Callable[[torch.Tensor], dict]] = {
     "compact": rle_encode,
     "optimized_v1": torch_mask_to_coco_optimized_v1,
     "optimized_v2": torch_mask_to_coco_optimized_v2,
+    "optimized_v3": torch_mask_to_coco_optimized_v3,
 }
 
 
