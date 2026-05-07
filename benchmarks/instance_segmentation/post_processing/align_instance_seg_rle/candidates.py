@@ -10,54 +10,30 @@ from inference_models.models.common.roboflow.model_packages import StaticCropOff
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.profiling import nvtx_range_if_cuda
 
 
-def _coco_counts_to_pairs(counts: list) -> list:
-    pairs = []
-    for index, count in enumerate(counts):
-        if count == 0:
-            continue
-        is_one = index % 2 == 1
-        pairs.append((is_one, count))
-    return pairs
+def _append_pair(pairs: list, value: bool, count: int) -> None:
+    """O(1) append of ``(value, count)`` to ``pairs``, merging with the previous
+    pair if values match. Zero-length appends are skipped. With consistent use,
+    ``pairs`` strictly alternates between ``False`` and ``True`` runs."""
+    if count == 0:
+        return
+    if pairs and pairs[-1][0] == value:
+        previous_value, previous_count = pairs[-1]
+        pairs[-1] = (previous_value, previous_count + count)
+    else:
+        pairs.append((value, count))
 
 
 def _pairs_to_coco_counts(pairs: list) -> list:
+    """Convert a strictly-alternating ``(value, count)`` list into COCO uncompressed
+    counts (alternating 0-run, 1-run, 0-run, ...). A leading ``0`` is inserted when
+    the first pair is a 1-run so the parity invariant holds."""
+    if not pairs:
+        return []
     counts: list = []
-    for is_one, count in pairs:
-        expected_one = len(counts) % 2 == 1
-        if is_one != expected_one:
-            counts.append(0)
+    if pairs[0][0]:
+        counts.append(0)
+    for _, count in pairs:
         counts.append(count)
-    return counts
-
-
-def _merge_pairs(left: list, right: list) -> list:
-    if not left:
-        return right[:]
-    if not right:
-        return left[:]
-    if left[-1][0] != right[0][0]:
-        return left + right
-    merged = left[:-1]
-    left_value, count_a = left[-1]
-    _, count_b = right[0]
-    merged.append((left_value, count_a + count_b))
-    merged.extend(right[1:])
-    return merged
-
-
-def _torch_column_to_coco_counts(column: torch.Tensor) -> list:
-    """
-    Quick worked example
-    Column data: [1,1,1, 0,0,0,0,0, 1,1], length 10.
-
-    torch.unique_consecutive: values=[1,0,1], lengths=[3,5,2].
-    Without guard: pairs would be [(False,3),(True,5),(False,2)] → meaning 3 zeros, 5 ones, 2 zeros. Wrong.
-    With guard: counts=[0,3,5,2] → pairs=[(True,3),(False,5),(True,2)] → 3 ones, 5 zeros, 2 ones. Correct.
-    """
-    values, lengths = torch.unique_consecutive(column, return_counts=True)
-    counts = lengths.cpu().tolist()
-    if values[0]:
-        counts.insert(0, 0)
     return counts
 
 
@@ -144,15 +120,24 @@ def torch_mask_to_coco_optimized_v2(
     return rle
 
 
-def torch_mask_to_coco_optimized_v3(
+def torch_mask_to_coco_optimized_v4(
     mask: torch.Tensor,
     bbox: torch.Tensor,
 ) -> dict:
     """
-    COCO RLE in Fortran (column-major) order. When foreground fits inside the
-    bounding box rectangle, encode each bbox column on GPU and stitch zero
-    runs for regions outside the box on CPU — avoiding ``unique_consecutive``
-    on the full ``H * W`` flatten.
+    COCO RLE in Fortran (column-major) order. Encodes only the cropped bbox
+    region on GPU (single ``unique_consecutive`` call), then walks the runs on
+    the CPU once to inject:
+    - leading zeros (full-zero columns ``[0, pixel_x1)`` plus ``top_pad``
+      zeros before the first crop column),
+    - zero padding between adjacent crop columns (``bottom_pad + top_pad``),
+    - trailing zeros (``bottom_pad`` of the last crop column plus full-zero
+      columns ``[pixel_x2, w)``).
+
+    Compared to per-column encoding this avoids ``crop_width`` separate kernel
+    launches (``DeviceCompactInitKernel``, ``DeviceReduceByKeyKernel``,
+    ``cub::DeviceRunLengthEncode``), per-column ``cudaMemcpyAsync`` and stream
+    syncs — collapsing them to one of each.
 
     ``bbox`` is ``xyxy`` (first four elements) expressed in the **same pixel
     grid as ``mask``** — i.e. the coordinate space of ``mask.shape``, not the
@@ -170,15 +155,10 @@ def torch_mask_to_coco_optimized_v3(
     x2 = float(bbox[2].item())
     y2 = float(bbox[3].item())
 
-    pixel_x1 = int(np.floor(x1))
-    pixel_x2 = int(np.ceil(x2))
-    pixel_y1 = int(np.floor(y1))
-    pixel_y2 = int(np.ceil(y2))
-
-    pixel_x1 = max(0, min(pixel_x1, w - 1))
-    pixel_x2 = max(0, min(pixel_x2, w))
-    pixel_y1 = max(0, min(pixel_y1, h - 1))
-    pixel_y2 = max(0, min(pixel_y2, h))
+    pixel_x1 = max(0, min(int(np.floor(x1)), w - 1))
+    pixel_x2 = max(0, min(int(np.ceil(x2)), w))
+    pixel_y1 = max(0, min(int(np.floor(y1)), h - 1))
+    pixel_y2 = max(0, min(int(np.ceil(y2)), h))
 
     if pixel_x2 <= pixel_x1 or pixel_y2 <= pixel_y1:
         with nvtx_range_if_cuda("degenerate mask-bbox", mask.device):
@@ -191,34 +171,54 @@ def torch_mask_to_coco_optimized_v3(
 
     top_pad = pixel_y1
     bottom_pad = h - pixel_y2
+    bbox_height = pixel_y2 - pixel_y1
     crop_width = pixel_x2 - pixel_x1
+    leading_zeros = pixel_x1 * h + top_pad
+    trailing_zeros = bottom_pad + (w - pixel_x2) * h
+    between_columns_pad = top_pad + bottom_pad
+    crop_flat_length = bbox_height * crop_width
 
-    with nvtx_range_if_cuda("crop columns", mask.device):
+    with nvtx_range_if_cuda("crop fortran flatten", mask.device):
+        crop_flat = (
+            mask[pixel_y1:pixel_y2, pixel_x1:pixel_x2].t().contiguous().view(-1)
+        )
+
+    with nvtx_range_if_cuda("unique consecutive (single)", mask.device):
+        values, lengths = torch.unique_consecutive(crop_flat, return_counts=True)
+
+    with nvtx_range_if_cuda("d->h", mask.device):
+        values_list = values.cpu().tolist()
+        lengths_list = lengths.cpu().tolist()
+
+    with nvtx_range_if_cuda("cpu stitch", mask.device):
         pairs: list = []
-        if pixel_x1 > 0:
-            pairs.append((False, pixel_x1 * h))
+        _append_pair(pairs, False, leading_zeros)
 
-        crop = mask[pixel_y1:pixel_y2, pixel_x1:pixel_x2]
+        position = 0
+        for value, length in zip(values_list, lengths_list):
+            is_one = bool(value)
+            remaining = length
+            while remaining > 0:
+                offset_within_column = position % bbox_height
+                space_in_current_column = bbox_height - offset_within_column
+                chunk = (
+                    remaining
+                    if remaining < space_in_current_column
+                    else space_in_current_column
+                )
+                _append_pair(pairs, is_one, chunk)
+                position += chunk
+                remaining -= chunk
+                at_column_boundary = (position % bbox_height) == 0
+                is_last_column_end = position == crop_flat_length
+                if (
+                    at_column_boundary
+                    and not is_last_column_end
+                    and between_columns_pad > 0
+                ):
+                    _append_pair(pairs, False, between_columns_pad)
 
-    with nvtx_range_if_cuda("column unique consecutive", mask.device):
-        for column_index in range(crop_width):
-            column = crop[:, column_index]
-            column_counts = _torch_column_to_coco_counts(column)
-            column_pairs = _coco_counts_to_pairs(column_counts)
-            full_column_pairs: list = []
-            if top_pad > 0:
-                full_column_pairs.append((False, top_pad))
-            full_column_pairs.extend(column_pairs)
-            if bottom_pad > 0:
-                full_column_pairs.append((False, bottom_pad))
-            merged_column: list = []
-            for pair in full_column_pairs:
-                merged_column = _merge_pairs(merged_column, [pair])
-            pairs = _merge_pairs(pairs, merged_column) if pairs else merged_column
-
-        if pixel_x2 < w:
-            pairs = _merge_pairs(pairs, [(False, (w - pixel_x2) * h)])
-
+        _append_pair(pairs, False, trailing_zeros)
         counts = _pairs_to_coco_counts(pairs)
 
     with nvtx_range_if_cuda("compress", mask.device):
