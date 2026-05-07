@@ -23,13 +23,8 @@ from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.dat
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.candidates import (
     torch_mask_to_coco_rle_old,
     torch_mask_to_coco_new,
-    torch_mask_to_coco_optimized_v1,
-    torch_mask_to_coco_optimized_v2,
-    # torch_mask_to_coco_optimized_v3,
-    torch_mask_to_coco_optimized_v4,
 )
 from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.profiling import nvtx_range_if_cuda
-from benchmarks.instance_segmentation.post_processing.align_instance_seg_rle.compact_mask import rle_encode
 
 CandidateFnType = Callable[
     [
@@ -54,11 +49,6 @@ CANDIDATE_FNS: Dict[str, CandidateFnType] = {
 RLE_BUILD_FNS: Dict[str, Callable[[torch.Tensor], dict]] = {
     "new": torch_mask_to_coco_new,
     "old": torch_mask_to_coco_rle_old,
-    "compact": rle_encode,
-    "optimized_v1": torch_mask_to_coco_optimized_v1,
-    "optimized_v2": torch_mask_to_coco_optimized_v2,
-    # "optimized_v3": torch_mask_to_coco_optimized_v3,
-    "optimized_v4": torch_mask_to_coco_optimized_v4,
 }
 
 
