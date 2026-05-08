@@ -290,6 +290,7 @@ def align_instance_segmentation_results_to_rle_masks_via_compact_resize(
         boxes_in_mask_coordinate_space_int[:, 0:2].clamp_(min=0)
         boxes_in_mask_coordinate_space_int[:, 2].clamp_(max=wm)
         boxes_in_mask_coordinate_space_int[:, 3].clamp_(max=hm)
+        boxes_in_mask_coordinate_space_int = boxes_in_mask_coordinate_space_int.cpu()
 
         boxes_in_mask_original_coordinate_space = image_bboxes[:, :4].clone()
         boxes_in_mask_original_coordinate_space[:, 0:2].floor_()
@@ -298,6 +299,9 @@ def align_instance_segmentation_results_to_rle_masks_via_compact_resize(
         boxes_in_mask_original_coordinate_space_int[:, 0:2].clamp_(min=0)
         boxes_in_mask_original_coordinate_space_int[:, 2].clamp_(max=original_size.width)
         boxes_in_mask_original_coordinate_space_int[:, 3].clamp_(max=original_size.height)
+        boxes_in_mask_original_coordinate_space_int = boxes_in_mask_original_coordinate_space_int.cpu()
+
+        torch.cuda.synchronize()
 
     with nvtx_range_if_cuda("create buffer", masks.device):
         buffer = torch.empty(
@@ -312,7 +316,7 @@ def align_instance_segmentation_results_to_rle_masks_via_compact_resize(
 
         with nvtx_range_if_cuda("crop mask", masks.device):
             mx1, my1, mx2, my2 = boxes_in_mask_coordinate_space_int[i]
-            cropped_mask = masks[i:i+1, my1:my2 + 1, mx1:mx2 + 1]
+            cropped_mask = masks[i:i+1, my1:my2 + 1, mx1:mx2 + 1].contiguous()
 
             ox1, oy1, ox2, oy2 = boxes_in_mask_original_coordinate_space_int[i]
             resize_target_w = ox2 - ox1
