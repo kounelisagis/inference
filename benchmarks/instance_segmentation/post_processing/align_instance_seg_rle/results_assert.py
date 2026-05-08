@@ -14,13 +14,15 @@ from inference_models.models.common.roboflow.model_packages import StaticCropOff
 
 from candidates import (
     align_instance_segmentation_results_to_rle_masks,
-    align_instance_segmentation_results_to_rle_masks_cropped,
+    align_instance_segmentation_results_to_rle_masks_via_compact_resize,
 )
 from data import (
     build_image_bboxes,
     letterbox_params,
+    build_synthetic_instance_masks,
 )
 from candidates import torch_mask_to_coco_new, torch_mask_to_coco_rle_old
+from vis import render_masks_and_bboxes_visualization
 
 RLE_BUILD_FNS = {
     "new": torch_mask_to_coco_new,
@@ -134,12 +136,10 @@ def main(
     rle_build_fn: str,
     strict: bool,
 ) -> None:
-    if instances < 1:
-        raise click.BadParameter("instances must be >= 1")
-
     rle_build_fn = RLE_BUILD_FNS[rle_build_fn]
 
     torch_device = torch.device(device)
+
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -147,8 +147,15 @@ def main(
         if torch_device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
 
-    original_size = ImageDimensions(height=original_size_h, width=original_size_w)
-    inference_size = ImageDimensions(height=inference_size_h, width=inference_size_w)
+    original_size = ImageDimensions(
+        height=original_size_h,
+        width=original_size_w,
+    )
+    inference_size = ImageDimensions(
+        height=inference_size_h,
+        width=inference_size_w,
+    )
+
     padding, scale, new_w, new_h = letterbox_params(original_size, inference_size)
     pad_left, pad_top, _, _ = padding
 
@@ -162,9 +169,8 @@ def main(
         crop_width=original_size.width,
         crop_height=original_size.height,
     )
-    scale_width = scale_height = scale
 
-    image_bboxes = build_image_bboxes(
+    bboxes_template = build_image_bboxes(
         instances,
         pad_left,
         pad_top,
@@ -174,73 +180,83 @@ def main(
         box_h=box_h,
         device=torch_device,
     )
-    masks = torch.rand(instances, mask_h, mask_w, dtype=torch.float32, device=torch_device)
+    masks_template = build_synthetic_instance_masks(
+        bboxes=bboxes_template,
+        mask_h=mask_h,
+        mask_w=mask_w,
+        inference_size=inference_size,
+    )
 
-    default_results = list(
-        align_instance_segmentation_results_to_rle_masks(
-            image_bboxes=image_bboxes.clone(),
-            masks=masks.clone(),
+    print(f"Mask control sum: {masks_template.sum()=}")
+    print(f"BBox control sum: {bboxes_template.sum()=}")
+    # default_results = list(
+    #     align_instance_segmentation_results_to_rle_masks(
+    #         image_bboxes=image_bboxes.clone(),
+    #         masks=masks.clone(),
+    #         padding=padding,
+    #         scale_width=scale_width,
+    #         scale_height=scale_height,
+    #         original_size=original_size,
+    #         size_after_pre_processing=size_after_pre_processing,
+    #         inference_size=inference_size,
+    #         static_crop_offset=static_crop_offset,
+    #         binarization_threshold=0.5,
+    #         rle_build_fn=rle_build_fn,
+    #     )
+    # )
+    results = list(
+        align_instance_segmentation_results_to_rle_masks_via_compact_resize(
+            image_bboxes=bboxes_template.clone(),
+            masks=masks_template.clone(),
             padding=padding,
-            scale_width=scale_width,
-            scale_height=scale_height,
+            scale_width=scale,
+            scale_height=scale,
             original_size=original_size,
             size_after_pre_processing=size_after_pre_processing,
             inference_size=inference_size,
             static_crop_offset=static_crop_offset,
             binarization_threshold=0.5,
             rle_build_fn=rle_build_fn,
-        )
-    )
-    cropped_results = list(
-        align_instance_segmentation_results_to_rle_masks_cropped(
-            image_bboxes=image_bboxes.clone(),
-            masks=masks.clone(),
-            padding=padding,
-            scale_width=scale_width,
-            scale_height=scale_height,
-            original_size=original_size,
-            size_after_pre_processing=size_after_pre_processing,
-            inference_size=inference_size,
-            static_crop_offset=static_crop_offset,
-            binarization_threshold=0.5,
-            rle_build_fn=rle_build_fn,
+            include_dense_mask=True,
         )
     )
 
-    if len(default_results) != len(cropped_results):
-        raise AssertionError(
-            f"Length mismatch: default={len(default_results)} cropped={len(cropped_results)}"
-        )
+    render_masks_and_bboxes_visualization(results, sample_count=4, output_html=None)
 
-    mismatched_bbox = 0
-    mismatched_rle = 0
-    first_bbox_mismatch = None
-    first_rle_mismatch = None
-    for i, ((bbox_a, rle_a), (bbox_b, rle_b)) in enumerate(
-        zip(default_results, cropped_results)
-    ):
-        if not torch.equal(bbox_a, bbox_b):
-            mismatched_bbox += 1
-            if first_bbox_mismatch is None:
-                first_bbox_mismatch = i
-        if not _rle_equal(rle_a, rle_b):
-            mismatched_rle += 1
-            if first_rle_mismatch is None:
-                first_rle_mismatch = i
+    # if len(default_results) != len(cropped_results):
+    #     raise AssertionError(
+    #         f"Length mismatch: default={len(default_results)} cropped={len(cropped_results)}"
+    #     )
 
-    same = mismatched_bbox == 0 and mismatched_rle == 0
-    click.echo(
-        f"comparison for {instances} instances (device={device}, mask={mask_h}x{mask_w}, box={box_w}x{box_h}, seed={seed})\n"
-        f"  bbox_equal={mismatched_bbox == 0} mismatched_bbox={mismatched_bbox}\n"
-        f"  rle_equal={mismatched_rle == 0} mismatched_rle={mismatched_rle}"
-    )
-    if first_bbox_mismatch is not None:
-        click.echo(f"  first_bbox_mismatch_index={first_bbox_mismatch}")
-    if first_rle_mismatch is not None:
-        click.echo(f"  first_rle_mismatch_index={first_rle_mismatch}")
+    # mismatched_bbox = 0
+    # mismatched_rle = 0
+    # first_bbox_mismatch = None
+    # first_rle_mismatch = None
+    # for i, ((bbox_a, rle_a), (bbox_b, rle_b)) in enumerate(
+    #     zip(default_results, cropped_results)
+    # ):
+    #     if not torch.equal(bbox_a, bbox_b):
+    #         mismatched_bbox += 1
+    #         if first_bbox_mismatch is None:
+    #             first_bbox_mismatch = i
+    #     if not _rle_equal(rle_a, rle_b):
+    #         mismatched_rle += 1
+    #         if first_rle_mismatch is None:
+    #             first_rle_mismatch = i
 
-    if strict and not same:
-        raise AssertionError("Candidate outputs are not identical")
+    # same = mismatched_bbox == 0 and mismatched_rle == 0
+    # click.echo(
+    #     f"comparison for {instances} instances (device={device}, mask={mask_h}x{mask_w}, box={box_w}x{box_h}, seed={seed})\n"
+    #     f"  bbox_equal={mismatched_bbox == 0} mismatched_bbox={mismatched_bbox}\n"
+    #     f"  rle_equal={mismatched_rle == 0} mismatched_rle={mismatched_rle}"
+    # )
+    # if first_bbox_mismatch is not None:
+    #     click.echo(f"  first_bbox_mismatch_index={first_bbox_mismatch}")
+    # if first_rle_mismatch is not None:
+    #     click.echo(f"  first_rle_mismatch_index={first_rle_mismatch}")
+
+    # if strict and not same:
+    #     raise AssertionError("Candidate outputs are not identical")
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ CandidateFnType = Callable[
 
 CANDIDATE_FNS: Dict[str, CandidateFnType] = {
     "default": align_instance_segmentation_results_to_rle_masks,
-    "compact_resize": align_instance_segmentation_results_to_rle_masks_via_compact_resize,
+    "gpu_crop_resize": align_instance_segmentation_results_to_rle_masks_via_compact_resize,
 }
 
 RLE_BUILD_FNS: Dict[str, Callable[[torch.Tensor], dict]] = {
