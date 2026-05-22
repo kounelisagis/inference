@@ -10,16 +10,14 @@ Example::
     cd inference_models
     uv run python development/benchmark_rfdetr_preprocess.py --output /tmp/rfdetr_preprocess.json
 
-    # PIL only / Triton only
     uv run python development/benchmark_rfdetr_preprocess.py --modes pil --output pil.json
-    USE_TRITON_FOR_PREPROCESSING=1 uv run python development/benchmark_rfdetr_preprocess.py --modes triton
+    uv run python development/benchmark_rfdetr_preprocess.py --modes triton --parity-check
 
 Requires CUDA (default). Use ``--allow-cpu`` only for smoke runs (PIL path on CPU).
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import platform
@@ -27,12 +25,13 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
+import click
 import numpy as np
 import torch
 
-# Imports after argparse/env are not required; we patch the flag at runtime.
 import inference_models.models.rfdetr.pre_processing as rfdetr_pre_processing
 from inference_models.models.common.roboflow.model_packages import (
     ColorMode,
@@ -47,6 +46,10 @@ BenchmarkMode = Literal["pil", "triton"]
 
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
+
+# Match unit tests: PIL-exact chain; fp32 noise only at float conversion boundaries.
+DEFAULT_PARITY_ATOL = 1e-6
+DEFAULT_PARITY_RTOL = 0.0
 
 
 @dataclass(frozen=True)
@@ -125,65 +128,6 @@ class BenchmarkReport:
     comparisons: List[Dict[str, Any]] = field(default_factory=list)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Benchmark RF-DETR preprocessing (PIL vs Triton) in isolation.",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Write JSON results to this path.",
-    )
-    parser.add_argument(
-        "--modes",
-        type=str,
-        default="pil,triton",
-        help="Comma-separated modes to run: pil, triton.",
-    )
-    parser.add_argument(
-        "--cases",
-        type=str,
-        default="default",
-        help="'default' for built-in cases, or comma-separated case names.",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda:0",
-        help="Torch device for preprocessing (default: cuda:0).",
-    )
-    parser.add_argument(
-        "--warmup",
-        type=int,
-        default=20,
-        help="Warm-up iterations per case/mode (not timed).",
-    )
-    parser.add_argument(
-        "--iterations",
-        type=int,
-        default=200,
-        help="Timed iterations per case/mode.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="RNG seed for synthetic uint8 images.",
-    )
-    parser.add_argument(
-        "--allow-cpu",
-        action="store_true",
-        help="Allow CPU device (Triton mode will be skipped).",
-    )
-    parser.add_argument(
-        "--parity-check",
-        action="store_true",
-        help="After benchmarking, assert PIL and Triton outputs match (CUDA + Triton only).",
-    )
-    return parser.parse_args()
-
-
 def parse_modes(raw: str) -> List[BenchmarkMode]:
     modes: List[BenchmarkMode] = []
     for part in raw.split(","):
@@ -191,25 +135,29 @@ def parse_modes(raw: str) -> List[BenchmarkMode]:
         if not part:
             continue
         if part not in ("pil", "triton"):
-            raise ValueError(f"Unknown mode {part!r}; expected pil or triton")
+            raise click.ClickException(f"Unknown mode {part!r}; expected pil or triton")
         modes.append(part)  # type: ignore[arg-type]
+
     if not modes:
-        raise ValueError("At least one mode required")
+        raise click.ClickException("At least one mode required")
+
     return modes
 
 
 def resolve_cases(raw: str) -> List[BenchmarkCase]:
     if raw.strip().lower() == "default":
         return list(DEFAULT_CASES)
+
     names = {c.strip() for c in raw.split(",") if c.strip()}
     selected = [c for c in DEFAULT_CASES if c.name in names]
     missing = names - {c.name for c in selected}
     if missing:
-        raise ValueError(f"Unknown case name(s): {sorted(missing)}")
+        raise click.ClickException(f"Unknown case name(s): {sorted(missing)}")
+
     return selected
 
 
-def set_triton_flag(enabled: bool) -> None:
+def set_triton_flag(*, enabled: bool) -> None:
     rfdetr_pre_processing.USE_TRITON_FOR_PREPROCESSING = enabled
 
 
@@ -217,12 +165,12 @@ def clear_preprocess_caches() -> None:
     rfdetr_pre_processing._get_resample_tables_cached.cache_clear()
 
 
-def sync_device(device: torch.device) -> None:
+def sync_device(*, device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
 
-def build_network_input(case: BenchmarkCase) -> NetworkInputDefinition:
+def build_network_input(*, case: BenchmarkCase) -> NetworkInputDefinition:
     return NetworkInputDefinition(
         training_input_size=TrainingInputSize(
             height=case.target_height,
@@ -238,7 +186,7 @@ def build_network_input(case: BenchmarkCase) -> NetworkInputDefinition:
     )
 
 
-def make_images(case: BenchmarkCase, seed: int) -> List[np.ndarray]:
+def make_images(*, case: BenchmarkCase, seed: int) -> List[np.ndarray]:
     images: List[np.ndarray] = []
     for batch_idx in range(case.batch_size):
         rng = np.random.default_rng(seed + batch_idx)
@@ -250,24 +198,32 @@ def make_images(case: BenchmarkCase, seed: int) -> List[np.ndarray]:
                 dtype=np.uint8,
             )
         )
+
     return images
 
 
-def make_inputs(case: BenchmarkCase, images: List[np.ndarray]) -> Any:
+def make_inputs(*, case: BenchmarkCase, images: List[np.ndarray]) -> Any:
     if case.batch_size == 1:
         return images[0]
+
     return images
 
 
-def path_label(mode: BenchmarkMode, eligible: bool, device: torch.device) -> str:
+def path_label(
+    *,
+    mode: BenchmarkMode,
+    eligible: bool,
+    device: torch.device,
+) -> str:
     if mode == "triton" and eligible and device.type == "cuda":
         return "triton"
+
     return "pil"
 
 
 def compute_stats(samples_ms: Sequence[float]) -> LatencyStats:
     arr = np.asarray(samples_ms, dtype=np.float64)
-    return LatencyStats(
+    stats = LatencyStats(
         samples_ms=len(arr),
         mean_ms=float(np.mean(arr)),
         min_ms=float(np.min(arr)),
@@ -277,25 +233,29 @@ def compute_stats(samples_ms: Sequence[float]) -> LatencyStats:
         std_ms=float(np.std(arr)),
     )
 
+    return stats
+
 
 def benchmark_callable(
     fn: Callable[[], None],
+    *,
     device: torch.device,
     warmup: int,
     iterations: int,
 ) -> List[float]:
     for _ in range(warmup):
         fn()
-        sync_device(device)
+        sync_device(device=device)
 
     samples_ms: List[float] = []
     for _ in range(iterations):
-        sync_device(device)
+        sync_device(device=device)
         start = time.perf_counter()
         fn()
-        sync_device(device)
+        sync_device(device=device)
         end = time.perf_counter()
         samples_ms.append((end - start) * 1000.0)
+
     return samples_ms
 
 
@@ -308,19 +268,26 @@ def try_git_commit() -> Optional[str]:
             timeout=5,
             check=False,
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        pass
-    return None
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    commit = result.stdout.strip()
+
+    return commit or None
 
 
 def collect_metadata(
+    *,
     device: torch.device,
     seed: int,
     warmup: int,
     iterations: int,
     modes: Sequence[BenchmarkMode],
+    parity_atol: float,
+    parity_rtol: float,
 ) -> Dict[str, Any]:
     cuda_meta: Dict[str, Any] = {}
     if device.type == "cuda" and torch.cuda.is_available():
@@ -337,7 +304,7 @@ def collect_metadata(
     else:
         cuda_meta = {"cuda_available": torch.cuda.is_available()}
 
-    return {
+    metadata = {
         "hostname": platform.node(),
         "platform": platform.platform(),
         "processor": platform.processor(),
@@ -348,6 +315,8 @@ def collect_metadata(
         "warmup_iterations": warmup,
         "timed_iterations": iterations,
         "modes": list(modes),
+        "parity_atol": parity_atol,
+        "parity_rtol": parity_rtol,
         "use_triton_for_preprocessing_env": os.environ.get(
             "USE_TRITON_FOR_PREPROCESSING"
         ),
@@ -356,8 +325,11 @@ def collect_metadata(
         **cuda_meta,
     }
 
+    return metadata
+
 
 def run_case_mode(
+    *,
     case: BenchmarkCase,
     mode: BenchmarkMode,
     device: torch.device,
@@ -365,17 +337,16 @@ def run_case_mode(
     warmup: int,
     iterations: int,
 ) -> Optional[CaseResult]:
-    images = make_images(case, seed=seed)
-    inputs = make_inputs(case, images)
+    images = make_images(case=case, seed=seed)
+    inputs = make_inputs(case=case, images=images)
     image_pre_processing = ImagePreProcessing()
-    network_input = build_network_input(case)
+    network_input = build_network_input(case=case)
 
-    set_triton_flag(mode == "triton")
+    set_triton_flag(enabled=(mode == "triton"))
     clear_preprocess_caches()
 
-    image_list = images
     eligible = rfdetr_pre_processing.triton_path_eligible(
-        image_list=image_list,
+        image_list=images,
         image_pre_processing=image_pre_processing,
         network_input=network_input,
         target_device=device,
@@ -394,7 +365,7 @@ def run_case_mode(
         print(f"  skip {case.name} [triton]: requires CUDA", file=sys.stderr)
         return None
 
-    used_path = path_label(mode, eligible, device)
+    used_path = path_label(mode=mode, eligible=eligible, device=device)
 
     def _run() -> None:
         out, _meta = pre_process_network_input(
@@ -404,7 +375,6 @@ def run_case_mode(
             target_device=device,
             input_color_format=case.input_color_format,
         )
-        # Prevent dead-code elimination of the output tensor.
         if out.numel() > 0:
             _ = float(out[0, 0, 0, 0].item())
 
@@ -414,12 +384,17 @@ def run_case_mode(
         f"bs={case.batch_size}, path={used_path}) ...",
         file=sys.stderr,
     )
-    samples = benchmark_callable(_run, device=device, warmup=warmup, iterations=iterations)
+    samples = benchmark_callable(
+        _run,
+        device=device,
+        warmup=warmup,
+        iterations=iterations,
+    )
     stats = compute_stats(samples)
     batch_factor = case.batch_size
     throughput = 1000.0 * batch_factor / stats.mean_ms if stats.mean_ms > 0 else 0.0
 
-    return CaseResult(
+    result = CaseResult(
         name=case.name,
         mode=mode,
         src_shape=[case.src_height, case.src_width, 3],
@@ -432,11 +407,13 @@ def run_case_mode(
         throughput_per_s=round(throughput, 2),
     )
 
+    return result
+
 
 def build_comparisons(results: List[CaseResult]) -> List[Dict[str, Any]]:
     by_name: Dict[str, Dict[BenchmarkMode, CaseResult]] = {}
-    for r in results:
-        by_name.setdefault(r.name, {})[r.mode] = r
+    for result in results:
+        by_name.setdefault(result.name, {})[result.mode] = result
 
     comparisons: List[Dict[str, Any]] = []
     for name, modes in sorted(by_name.items()):
@@ -444,6 +421,7 @@ def build_comparisons(results: List[CaseResult]) -> List[Dict[str, Any]]:
         triton = modes.get("triton")
         if pil is None or triton is None:
             continue
+
         pil_p50 = pil.latency.p50_ms
         triton_p50 = triton.latency.p50_ms
         speedup_p50 = pil_p50 / triton_p50 if triton_p50 > 0 else None
@@ -463,30 +441,33 @@ def build_comparisons(results: List[CaseResult]) -> List[Dict[str, Any]]:
                 "speedup_p95": round(speedup_p95, 3) if speedup_p95 else None,
             }
         )
+
     return comparisons
 
 
 def check_parity(
+    *,
     cases: Sequence[BenchmarkCase],
     device: torch.device,
     seed: int,
-    atol: float = 0.0,
-    rtol: float = 0.0,
+    atol: float,
+    rtol: float,
 ) -> None:
     if device.type != "cuda":
         print("parity-check skipped: requires CUDA", file=sys.stderr)
         return
+
     if not rfdetr_pre_processing._TRITON_AVAILABLE:
         print("parity-check skipped: Triton not available", file=sys.stderr)
         return
 
     image_pre_processing = ImagePreProcessing()
     for case in cases:
-        images = make_images(case, seed=seed)
-        inputs = make_inputs(case, images)
-        network_input = build_network_input(case)
+        images = make_images(case=case, seed=seed)
+        inputs = make_inputs(case=case, images=images)
+        network_input = build_network_input(case=case)
 
-        set_triton_flag(False)
+        set_triton_flag(enabled=False)
         clear_preprocess_caches()
         pil_out, _ = pre_process_network_input(
             images=inputs,
@@ -496,16 +477,20 @@ def check_parity(
             input_color_format=case.input_color_format,
         )
 
-        set_triton_flag(True)
+        set_triton_flag(enabled=True)
         clear_preprocess_caches()
-        if not rfdetr_pre_processing.triton_path_eligible(
-            image_list=images if case.batch_size > 1 else [images[0]],
+        eligible = rfdetr_pre_processing.triton_path_eligible(
+            image_list=images,
             image_pre_processing=image_pre_processing,
             network_input=network_input,
             target_device=device,
             pre_processing_overrides=None,
-        ):
-            print(f"parity-check skipped for {case.name}: not triton-eligible", file=sys.stderr)
+        )
+        if not eligible:
+            print(
+                f"parity-check skipped for {case.name}: not triton-eligible",
+                file=sys.stderr,
+            )
             continue
 
         triton_out, _ = pre_process_network_input(
@@ -516,72 +501,219 @@ def check_parity(
             input_color_format=case.input_color_format,
         )
         torch.testing.assert_close(pil_out, triton_out, atol=atol, rtol=rtol)
-        print(f"parity-check ok: {case.name}", file=sys.stderr)
+        print(
+            f"parity-check ok: {case.name} (atol={atol}, rtol={rtol})",
+            file=sys.stderr,
+        )
 
 
 def report_to_dict(report: BenchmarkReport) -> Dict[str, Any]:
     def _convert(obj: Any) -> Any:
         if hasattr(obj, "__dataclass_fields__"):
-            return {k: _convert(v) for k, v in asdict(obj).items()}
+            converted = {k: _convert(v) for k, v in asdict(obj).items()}
+            return converted
         if isinstance(obj, list):
-            return [_convert(x) for x in obj]
+            converted = [_convert(item) for item in obj]
+            return converted
         if isinstance(obj, dict):
-            return {k: _convert(v) for k, v in obj.items()}
+            converted = {k: _convert(v) for k, v in obj.items()}
+            return converted
+
         return obj
 
-    return _convert(report)
+    payload = _convert(report)
+
+    return payload
 
 
-def resolve_device(device_str: str, allow_cpu: bool) -> torch.device:
+def resolve_device(*, device_str: str, allow_cpu: bool) -> torch.device:
     device = torch.device(device_str)
     if device.type == "cuda":
         if not torch.cuda.is_available():
-            raise SystemExit("CUDA requested but torch.cuda.is_available() is False")
+            raise click.ClickException(
+                "CUDA requested but torch.cuda.is_available() is False"
+            )
+
         return device
+
     if device.type == "cpu" and allow_cpu:
         return device
-    raise SystemExit(
+
+    raise click.ClickException(
         f"Device {device_str!r} is not supported. Use cuda:N or pass --allow-cpu."
     )
 
 
-def main() -> None:
-    args = parse_args()
-    modes = parse_modes(args.modes)
-    cases = resolve_cases(args.cases)
-    device = resolve_device(args.device, allow_cpu=args.allow_cpu)
-
-    # Reproducibility for CUDA (where implemented).
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+def seed_devices(*, seed: int, device: torch.device) -> None:
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     if device.type == "cuda":
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed_all(seed)
+
+
+def write_report(*, output_path: Optional[Path], payload: Dict[str, Any]) -> None:
+    text = json.dumps(payload, indent=2)
+
+    if output_path is None:
+        print(text)
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    print(f"\nWrote {output_path}", file=sys.stderr)
+
+
+def print_speedup_summary(comparisons: List[Dict[str, Any]]) -> None:
+    if not comparisons:
+        return
+
+    print("\n--- speedup (pil_p50 / triton_p50) ---", file=sys.stderr)
+    for comparison in comparisons:
+        print(
+            f"  {comparison['name']}: p50={comparison['speedup_p50']}x, "
+            f"p95={comparison['speedup_p95']}x",
+            file=sys.stderr,
+        )
+
+
+@click.command()
+@click.option(
+    "--output",
+    type=click.Path(
+        path_type=Path,
+        dir_okay=False,
+    ),
+    default=None,
+    show_default=True,
+    help="Write JSON results to this path.",
+)
+@click.option(
+    "--modes",
+    type=str,
+    default="pil,triton",
+    show_default=True,
+    help="Comma-separated modes to run: pil, triton.",
+)
+@click.option(
+    "--cases",
+    type=str,
+    default="default",
+    show_default=True,
+    help="'default' for built-in cases, or comma-separated case names.",
+)
+@click.option(
+    "--device",
+    type=str,
+    default="cuda:0",
+    show_default=True,
+    help="Torch device for preprocessing.",
+)
+@click.option(
+    "--warmup",
+    type=click.IntRange(
+        min=0,
+    ),
+    default=20,
+    show_default=True,
+    help="Warm-up iterations per case/mode (not timed).",
+)
+@click.option(
+    "--iterations",
+    type=click.IntRange(
+        min=1,
+    ),
+    default=200,
+    show_default=True,
+    help="Timed iterations per case/mode.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=42,
+    show_default=True,
+    help="RNG seed for synthetic uint8 images.",
+)
+@click.option(
+    "--allow-cpu",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="Allow CPU device (Triton mode will be skipped).",
+)
+@click.option(
+    "--parity-check",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="After benchmarking, assert PIL and Triton outputs match (CUDA + Triton only).",
+)
+@click.option(
+    "--parity-atol",
+    type=float,
+    default=DEFAULT_PARITY_ATOL,
+    show_default=True,
+    help="Absolute tolerance for parity-check (torch.testing.assert_close).",
+)
+@click.option(
+    "--parity-rtol",
+    type=float,
+    default=DEFAULT_PARITY_RTOL,
+    show_default=True,
+    help="Relative tolerance for parity-check (torch.testing.assert_close).",
+)
+def main(
+    output: Optional[Path],
+    modes: str,
+    cases: str,
+    device: str,
+    warmup: int,
+    iterations: int,
+    seed: int,
+    allow_cpu: bool,
+    parity_check: bool,
+    parity_atol: float,
+    parity_rtol: float,
+) -> None:
+    """Benchmark RF-DETR preprocessing (PIL vs Triton) in isolation."""
+    if parity_atol < 0:
+        raise click.ClickException("--parity-atol must be non-negative")
+
+    if parity_rtol < 0:
+        raise click.ClickException("--parity-rtol must be non-negative")
+
+    parsed_modes = parse_modes(modes)
+    resolved_cases = resolve_cases(cases)
+    torch_device = resolve_device(device_str=device, allow_cpu=allow_cpu)
+
+    seed_devices(seed=seed, device=torch_device)
 
     print(
-        f"RF-DETR preprocess benchmark: device={device}, modes={modes}, "
-        f"warmup={args.warmup}, iterations={args.iterations}, seed={args.seed}",
+        f"RF-DETR preprocess benchmark: device={torch_device}, modes={parsed_modes}, "
+        f"warmup={warmup}, iterations={iterations}, seed={seed}",
         file=sys.stderr,
     )
 
     metadata = collect_metadata(
-        device=device,
-        seed=args.seed,
-        warmup=args.warmup,
-        iterations=args.iterations,
-        modes=modes,
+        device=torch_device,
+        seed=seed,
+        warmup=warmup,
+        iterations=iterations,
+        modes=parsed_modes,
+        parity_atol=parity_atol,
+        parity_rtol=parity_rtol,
     )
     report = BenchmarkReport(metadata=metadata)
 
-    for mode in modes:
+    for mode in parsed_modes:
         print(f"\n=== mode: {mode} ===", file=sys.stderr)
-        for case in cases:
+        for case in resolved_cases:
             result = run_case_mode(
                 case=case,
                 mode=mode,
-                device=device,
-                seed=args.seed,
-                warmup=args.warmup,
-                iterations=args.iterations,
+                device=torch_device,
+                seed=seed,
+                warmup=warmup,
+                iterations=iterations,
             )
             if result is not None:
                 report.cases.append(result)
@@ -589,28 +721,18 @@ def main() -> None:
     report.comparisons = build_comparisons(report.cases)
     payload = report_to_dict(report)
 
-    text = json.dumps(payload, indent=2)
-    if args.output:
-        out_dir = os.path.dirname(os.path.abspath(args.output))
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"\nWrote {args.output}", file=sys.stderr)
-    else:
-        print(text)
+    write_report(output_path=output, payload=payload)
+    print_speedup_summary(report.comparisons)
 
-    if report.comparisons:
-        print("\n--- speedup (pil_p50 / triton_p50) ---", file=sys.stderr)
-        for c in report.comparisons:
-            print(
-                f"  {c['name']}: p50={c['speedup_p50']}x, p95={c['speedup_p95']}x",
-                file=sys.stderr,
-            )
-
-    if args.parity_check:
+    if parity_check:
         print("\n=== parity check ===", file=sys.stderr)
-        check_parity(cases=cases, device=device, seed=args.seed)
+        check_parity(
+            cases=resolved_cases,
+            device=torch_device,
+            seed=seed,
+            atol=parity_atol,
+            rtol=parity_rtol,
+        )
 
 
 if __name__ == "__main__":

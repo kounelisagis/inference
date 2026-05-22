@@ -226,9 +226,10 @@ cd inference_models
 uv run python development/benchmark_rfdetr_preprocess.py --output /tmp/rfdetr_preprocess.json
 uv run python development/benchmark_rfdetr_preprocess.py --modes pil --output /tmp/pil.json
 uv run python development/benchmark_rfdetr_preprocess.py --modes triton --parity-check --output /tmp/triton.json
+uv run python development/benchmark_rfdetr_preprocess.py --parity-check --parity-atol 1e-6 --parity-rtol 0
 ```
 
-Defaults: warmup=20, timed iterations=200, seed=42, compares PIL vs Triton with p50/p95 and speedup in JSON.
+Defaults: warmup=20, timed iterations=200, seed=42, parity `--parity-atol 1e-6` / `--parity-rtol 0` (matches unit tests).
 
 Document commands in PR description or this file when the script exists.
 
